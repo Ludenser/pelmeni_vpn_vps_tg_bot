@@ -306,16 +306,26 @@ def limited_user_rename_profile(uid: int, old_name: str, new_name: str):
     return None
 
 
-async def send_user_links(update_or_message, context, name: str, uuid: str):
+async def send_user_links(update_or_message, context, name: str, uuid: str, ports: list[int] | None = None):
     msg = update_or_message
-    l443 = make_link(uuid, name, 443)
-    l2087 = make_link(uuid, name, 2087)
-    await msg.reply_text(
-        f'Данные подключения для {name}:\n\n'
-        f'Порт 443 (основная):\n{l443}\n\n'
-        f'Порт 2087 (WiFi резерв):\n{l2087}'
+    selected_ports = ports if ports else [443, 2087]
+    selected_ports = [int(p) for p in selected_ports if int(p) in {443, 2087}]
+    if not selected_ports:
+        selected_ports = [443]
+
+    links = {port: make_link(uuid, name, port) for port in selected_ports}
+    lines = [f'Данные подключения для {name}:\n']
+    if 443 in links:
+        lines.append(f'Порт 443 (основная):\n{links[443]}')
+    if 2087 in links:
+        lines.append(f'Порт 2087 (WiFi резерв):\n{links[2087]}')
+    await msg.reply_text('\n\n'.join(lines))
+
+    qr_port = 443 if 443 in links else selected_ports[0]
+    await msg.reply_photo(
+        photo=make_qr_bytes(links[qr_port]),
+        caption=f'QR-код для {name} (порт {qr_port})'
     )
-    await msg.reply_photo(photo=make_qr_bytes(l443), caption=f'QR-код для {name} (порт 443)')
 
 
 def _coerce_limited_user_rec(rec):

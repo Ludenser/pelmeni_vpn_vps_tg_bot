@@ -3,6 +3,8 @@ import os
 import sqlite3
 import time
 
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
 from vpn_bot_config import (
     ACCESS_DB_PATH,
     DEFAULT_LIMITED_MAX_ACTIVE,
@@ -37,6 +39,7 @@ def init_access_db():
         'profile_names TEXT NOT NULL DEFAULT "[]",'
         'full_name TEXT NOT NULL DEFAULT "",'
         'username TEXT NOT NULL DEFAULT "",'
+        'key_port INTEGER NOT NULL DEFAULT 443,'
         'max_active INTEGER NOT NULL DEFAULT 3,'
         'max_creates INTEGER NOT NULL DEFAULT 1,'
         'used_creates INTEGER NOT NULL DEFAULT 0'
@@ -66,6 +69,8 @@ def init_access_db():
         conn.execute('ALTER TABLE limited_users ADD COLUMN full_name TEXT NOT NULL DEFAULT ""')
     if 'username' not in cols:
         conn.execute('ALTER TABLE limited_users ADD COLUMN username TEXT NOT NULL DEFAULT ""')
+    if 'key_port' not in cols:
+        conn.execute('ALTER TABLE limited_users ADD COLUMN key_port INTEGER NOT NULL DEFAULT 443')
     conn.execute(
         'UPDATE limited_users SET profile_names=json_array(profile_name) '
         'WHERE COALESCE(profile_name, "") != "" AND COALESCE(profile_names, "[]")="[]"'
@@ -140,11 +145,11 @@ def save_admins(admins: set):
 def load_users() -> dict:
     conn = access_conn()
     cur = conn.cursor()
-    cur.execute('SELECT user_id, profile_name, profile_names, full_name, username, max_active FROM limited_users')
+    cur.execute('SELECT user_id, profile_name, profile_names, full_name, username, key_port, max_active FROM limited_users')
     rows = cur.fetchall()
     conn.close()
     out = {}
-    for uid, profile, profile_names_raw, full_name, username, max_active in rows:
+    for uid, profile, profile_names_raw, full_name, username, key_port, max_active in rows:
         profile_names = []
         try:
             parsed = json.loads(profile_names_raw or '[]')
@@ -158,6 +163,7 @@ def load_users() -> dict:
             'profile_names': profile_names,
             'full_name': str(full_name or '').strip(),
             'username': str(username or '').strip().lstrip('@'),
+            'key_port': int(key_port or 443),
             'max_active': int(max_active or DEFAULT_LIMITED_MAX_ACTIVE),
         }
     return out
@@ -177,6 +183,9 @@ def save_users(users: dict):
             clean_profiles = [str(x) for x in profile_names if str(x).strip()]
             full_name = str(data.get('full_name', '') or '').strip()
             username = str(data.get('username', '') or '').strip().lstrip('@')
+            key_port = int(data.get('key_port', 443) or 443)
+            if key_port not in {443, 2087}:
+                key_port = 443
             profile_name = clean_profiles[0] if clean_profiles else ''
             max_active = int(data.get('max_active', DEFAULT_LIMITED_MAX_ACTIVE) or DEFAULT_LIMITED_MAX_ACTIVE)
         else:
@@ -184,18 +193,20 @@ def save_users(users: dict):
             clean_profiles = [profile_name] if profile_name else []
             full_name = ''
             username = ''
+            key_port = 443
             max_active = DEFAULT_LIMITED_MAX_ACTIVE
         max_active = max(0, max_active)
-        payload.append((uid_str, profile_name, json.dumps(clean_profiles, ensure_ascii=False), full_name, username, max_active))
+        payload.append((uid_str, profile_name, json.dumps(clean_profiles, ensure_ascii=False), full_name, username, key_port, max_active))
         user_ids.append(uid_str)
     if payload:
         conn.executemany(
-            'INSERT INTO limited_users (user_id, profile_name, profile_names, full_name, username, max_active) VALUES (?, ?, ?, ?, ?, ?) '
+            'INSERT INTO limited_users (user_id, profile_name, profile_names, full_name, username, key_port, max_active) VALUES (?, ?, ?, ?, ?, ?, ?) '
             'ON CONFLICT(user_id) DO UPDATE SET '
             'profile_name=excluded.profile_name, '
             'profile_names=excluded.profile_names, '
             'full_name=excluded.full_name, '
             'username=excluded.username, '
+            'key_port=excluded.key_port, '
             'max_active=excluded.max_active',
             payload
         )
@@ -270,14 +281,27 @@ async def notify_unauthorized_user(bot, user):
     if not should_send_unauthorized_alert(uid):
         return
     name = f'@{user.username}' if user.username else user.full_name or '—'
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton('Лимит 1', callback_data=f'apv:adduser:{uid}:1'),
+                InlineKeyboardButton(f'Лимит {DEFAULT_LIMITED_MAX_ACTIVE}', callback_data=f'apv:adduser:{uid}:{DEFAULT_LIMITED_MAX_ACTIVE}'),
+                InlineKeyboardButton('Лимит 5', callback_data=f'apv:adduser:{uid}:5'),
+            ],
+            [InlineKeyboardButton('Сделать админом', callback_data=f'apv:addadmin:{uid}')],
+        ]
+    )
     await bot.send_message(
         OWNER_ID,
         f'Попытка доступа к боту:\n'
         f'ID: {uid}\n'
         f'Имя: {user.full_name}\n'
         f'Username: {name}\n\n'
-        f'Чтобы добавить админом: /addadmin {uid}\n'
-        f'Чтобы добавить с лимитом: /adduser {uid} {DEFAULT_LIMITED_MAX_ACTIVE}'
+        'Выбери действие кнопками ниже.\n'
+        f'Команды на всякий случай:\n'
+        f'/addadmin {uid}\n'
+        f'/adduser {uid} {DEFAULT_LIMITED_MAX_ACTIVE}',
+        reply_markup=keyboard
     )
 
 

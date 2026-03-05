@@ -81,7 +81,12 @@ async def cmd_start(u: Update, c):
     clear_pending(uid)
     if not is_allowed(uid):
         await notify_unauthorized_user(c.bot, user)
-        await u.message.reply_text('У тебя нет доступа к этому боту.')
+        await u.message.reply_text(
+            'Доступ к боту пока не выдан.\n\n'
+            'Я отправил владельцу запрос на доступ с твоим ID.\n'
+            'После одобрения ты получишь отдельное сообщение от бота.\n\n'
+            f'Твой Telegram ID: {uid}'
+        )
         return
     if is_owner(uid):
         await u.message.reply_text(
@@ -346,14 +351,29 @@ async def cmd_adduser(u: Update, c):
         'profile_names': [],
         'full_name': full_name,
         'username': username,
+        'key_port': 443,
         'max_active': limit,
     }
     save_users(users)
     identity = f'\nИмя: {full_name or "—"}\nUsername: @{username}' if username else f'\nИмя: {full_name or "—"}'
     await u.message.reply_text(
         f'Добавлен лимитный пользователь: {new_id}\n'
-        f'Лимит активных профилей: {limit}{identity}'
+        f'Лимит активных профилей: {limit}\n'
+        f'Порт выдачи ключей: 443{identity}'
     )
+    try:
+        await c.bot.send_message(
+            chat_id=int(new_id),
+            text=(
+                'Тебе выдан доступ к VPN-боту.\n\n'
+                f'Лимит активных профилей: {limit}\n'
+                'Порт выдачи ключей: 443\n'
+                'Отправь /start, чтобы увидеть доступные команды.'
+            )
+        )
+    except Exception:
+        # Пользователь мог не начать чат с ботом или заблокировать его.
+        pass
 
 
 async def cmd_setuserlimit(u: Update, c):
@@ -375,6 +395,7 @@ async def cmd_setuserlimit(u: Update, c):
             'profile_names': [str(rec)] if rec else [],
             'full_name': '',
             'username': '',
+            'key_port': 443,
             'max_active': DEFAULT_LIMITED_MAX_ACTIVE,
         }
     rec['max_active'] = new_limit
@@ -472,6 +493,53 @@ async def cb_limited_users(u: Update, c):
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
         return
 
+    if action == 'port' and len(parts) >= 3:
+        target_uid = parts[2]
+        rec = users.get(str(target_uid))
+        if rec is None:
+            await query.answer('Пользователь не найден', show_alert=True)
+            return
+        current_port = int(rec.get('key_port', 443) or 443) if isinstance(rec, dict) else 443
+        if current_port not in {443, 2087}:
+            current_port = 443
+        text = (
+            f'Порт выдачи ключей для {target_uid}\n'
+            f'Текущий порт: {current_port}\n'
+            'Выбери порт.'
+        )
+        keyboard = [
+            [
+                InlineKeyboardButton('443' + (' ✓' if current_port == 443 else ''), callback_data=f'lu:portset:{target_uid}:443'),
+                InlineKeyboardButton('2087' + (' ✓' if current_port == 2087 else ''), callback_data=f'lu:portset:{target_uid}:2087'),
+            ],
+            [InlineKeyboardButton('<< Назад', callback_data=f'lu:open:{target_uid}')],
+        ]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+        return
+
+    if action == 'portset' and len(parts) >= 4:
+        target_uid, raw_port = parts[2], parts[3]
+        if raw_port not in {'443', '2087'}:
+            await query.answer('Некорректный порт', show_alert=True)
+            return
+        rec = users.get(str(target_uid))
+        if rec is None:
+            await query.answer('Пользователь не найден', show_alert=True)
+            return
+        names, _ = _coerce_limited_user_rec(rec)
+        rec_obj = {
+            'profile_names': names,
+            'full_name': str(rec.get('full_name', '') or '').strip() if isinstance(rec, dict) else '',
+            'username': str(rec.get('username', '') or '').strip().lstrip('@') if isinstance(rec, dict) else '',
+            'key_port': int(raw_port),
+            'max_active': int(rec.get('max_active', DEFAULT_LIMITED_MAX_ACTIVE) or DEFAULT_LIMITED_MAX_ACTIVE) if isinstance(rec, dict) else DEFAULT_LIMITED_MAX_ACTIVE,
+        }
+        users[str(target_uid)] = rec_obj
+        save_users(users)
+        text, markup = _limited_user_card_payload(target_uid, load_users(), is_owner(uid))
+        await query.edit_message_text(text, reply_markup=markup)
+        return
+
     if action == 'limset' and len(parts) >= 4:
         if not is_owner(uid):
             await query.answer('Только владелец может менять лимит', show_alert=True)
@@ -489,6 +557,7 @@ async def cb_limited_users(u: Update, c):
             'profile_names': names,
             'full_name': str(rec.get('full_name', '') or '').strip() if isinstance(rec, dict) else '',
             'username': str(rec.get('username', '') or '').strip().lstrip('@') if isinstance(rec, dict) else '',
+            'key_port': int(rec.get('key_port', 443) or 443) if isinstance(rec, dict) else 443,
             'max_active': max(0, int(raw_limit))
         }
         users[str(target_uid)] = rec_obj
@@ -616,6 +685,87 @@ async def cb_limited_users(u: Update, c):
         return
 
 
+async def cb_owner_approve(u: Update, c):
+    query = u.callback_query
+    await query.answer()
+    owner_uid = u.effective_user.id
+    if not is_owner(owner_uid):
+        return
+    data = query.data or ''
+    if not data.startswith('apv:'):
+        return
+    parts = data.split(':')
+    if len(parts) < 3:
+        await query.answer('Некорректные данные', show_alert=True)
+        return
+
+    action = parts[1]
+    target_uid = parts[2]
+    if not target_uid.isdigit():
+        await query.answer('Некорректный ID', show_alert=True)
+        return
+
+    if action == 'addadmin':
+        new_id = int(target_uid)
+        admins = load_admins()
+        if new_id in admins:
+            await query.answer('Уже админ', show_alert=True)
+            return
+        admins.add(new_id)
+        save_admins(admins)
+        await query.message.reply_text(f'Аппрув выполнен: {new_id} добавлен в админы.')
+        try:
+            await c.bot.send_message(
+                chat_id=new_id,
+                text='Тебе выдан доступ администратора к VPN-боту.\nОтправь /start.'
+            )
+        except Exception:
+            pass
+        return
+
+    if action == 'adduser':
+        if len(parts) < 4 or not parts[3].isdigit():
+            await query.answer('Некорректный лимит', show_alert=True)
+            return
+        limit = max(0, int(parts[3]))
+        users = load_users()
+        full_name, username = get_access_attempt_identity(target_uid)
+        rec = users.get(target_uid)
+        if not isinstance(rec, dict):
+            rec = {
+                'profile_names': [str(rec)] if rec else [],
+                'full_name': '',
+                'username': '',
+                'key_port': 443,
+                'max_active': DEFAULT_LIMITED_MAX_ACTIVE,
+            }
+        rec['full_name'] = full_name or str(rec.get('full_name', '') or '').strip()
+        rec['username'] = (username or str(rec.get('username', '') or '').strip()).lstrip('@')
+        rec['key_port'] = int(rec.get('key_port', 443) or 443)
+        if rec['key_port'] not in {443, 2087}:
+            rec['key_port'] = 443
+        rec['max_active'] = limit
+        users[target_uid] = rec
+        save_users(users)
+        await query.message.reply_text(
+            f'Аппрув выполнен: {target_uid} добавлен как лимитный пользователь.\n'
+            f'Лимит: {limit}, порт ключей: {rec["key_port"]}'
+        )
+        try:
+            await c.bot.send_message(
+                chat_id=int(target_uid),
+                text=(
+                    'Тебе выдан доступ к VPN-боту.\n\n'
+                    f'Лимит активных профилей: {limit}\n'
+                    f'Порт выдачи ключей: {rec["key_port"]}\n'
+                    'Отправь /start, чтобы увидеть команды.'
+                )
+            )
+        except Exception:
+            pass
+        return
+
+
 async def cmd_myvpn(u: Update, c):
     uid = u.effective_user.id
     if not is_allowed(uid):
@@ -698,7 +848,14 @@ async def cmd_myvpn(u: Update, c):
     if err:
         await u.message.reply_text(err)
         return
-    await send_user_links(u.message, c, name, uuid)
+    users = load_users()
+    rec = users.get(str(uid))
+    key_port = 443
+    if isinstance(rec, dict):
+        key_port = int(rec.get('key_port', 443) or 443)
+    if key_port not in {443, 2087}:
+        key_port = 443
+    await send_user_links(u.message, c, name, uuid, ports=[key_port])
 
 
 async def cmd_myprofiles(u: Update, c):
@@ -850,6 +1007,7 @@ async def handle_unknown(u: Update, c):
             'profile_names': names,
             'full_name': str(rec.get('full_name', '') or '').strip() if isinstance(rec, dict) else '',
             'username': str(rec.get('username', '') or '').strip().lstrip('@') if isinstance(rec, dict) else '',
+            'key_port': int(rec.get('key_port', 443) or 443) if isinstance(rec, dict) else 443,
             'max_active': new_limit
         }
         save_users(users)
@@ -918,6 +1076,7 @@ def main():
     app.add_handler(CallbackQueryHandler(cb_link, pattern='^link:'))
     app.add_handler(CallbackQueryHandler(cb_list_page, pattern='^listpg:'))
     app.add_handler(CallbackQueryHandler(cb_limited_users, pattern='^lu:'))
+    app.add_handler(CallbackQueryHandler(cb_owner_approve, pattern='^apv:'))
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_unknown))
     log.info('VPN Bot started')
     app.run_polling(allowed_updates=Update.ALL_TYPES)

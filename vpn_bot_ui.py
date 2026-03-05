@@ -68,6 +68,11 @@ def _limited_user_card_payload(target_uid: str, users: dict, viewer_is_owner: bo
         )
 
     tracked_names, limit = _coerce_limited_user_rec(rec)
+    key_port = 443
+    if isinstance(rec, dict):
+        key_port = int(rec.get('key_port', 443) or 443)
+    if key_port not in {443, 2087}:
+        key_port = 443
     _, settings = get_inbound()
     active_names = []
     if settings:
@@ -79,6 +84,7 @@ def _limited_user_card_payload(target_uid: str, users: dict, viewer_is_owner: bo
         f'Лимитный пользователь: {target_uid}',
         f'Идентификатор: {_format_identity(rec)}',
         f'Активные профили: {len(active_names)}/{limit}',
+        f'Порт выдачи ключей: {key_port}',
     ]
     if active_names:
         lines.append('')
@@ -90,6 +96,7 @@ def _limited_user_card_payload(target_uid: str, users: dict, viewer_is_owner: bo
 
     keyboard = [
         [InlineKeyboardButton('Изменить лимит', callback_data=f'lu:limit:{target_uid}')],
+        [InlineKeyboardButton('Порт ключей', callback_data=f'lu:port:{target_uid}')],
         [InlineKeyboardButton('Переименовать профиль', callback_data=f'lu:sel:{target_uid}:ren')],
         [InlineKeyboardButton('Удалить профиль', callback_data=f'lu:sel:{target_uid}:del')],
     ]
