@@ -2,6 +2,4 @@
 !.gitignore
 !README.md
 !requirements.txt
-!vpn-bot.py
-!vpn_bot_core.py
 !vpn_bot_*.py
